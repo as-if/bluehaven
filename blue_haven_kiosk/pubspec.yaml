@@ -1,0 +1,29 @@
+name: blue_haven_kiosk
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.8
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^4.9.0
+  cloud_firestore: ^6.4.1
+  flutter_riverpod: ^3.3.1
+  flutter_webrtc: ^1.4.1
+  permission_handler: ^12.0.1
+  intl: ^0.19.0
+  qr_flutter: ^4.1.0
+  shared_preferences: ^2.3.2
+  http: ^1.2.1
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

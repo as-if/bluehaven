@@ -1,0 +1,164 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Role helpers ────────────────────────────────────────────────────────
+    // IMPORTANT: Flutter stores roles as lowercase strings:
+    //   'manager', 'supervisor', 'staff'
+    function getUserRole() {
+      let userDoc = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(userDoc)
+        ? get(userDoc).data.get('role', '')
+        : '';
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Manager only (lowercase, matching Flutter AppUser model)
+    function isManager() {
+      return isAuthenticated() && (
+        request.auth.token.get('role', '') == 'manager' ||
+        getUserRole() == 'manager'
+      );
+    }
+
+    // Manager or Supervisor
+    function isPrivileged() {
+      return isAuthenticated() && (
+        request.auth.token.get('role', '') in ['manager', 'supervisor'] ||
+        getUserRole() in ['manager', 'supervisor']
+      );
+    }
+
+    // Staff or above
+    function isStaff() {
+      return isAuthenticated() && (
+        request.auth.token.get('role', '') in ['manager', 'supervisor', 'staff'] ||
+        getUserRole() in ['manager', 'supervisor', 'staff']
+      );
+    }
+
+
+    // ── Collection group: ledger ─────────────────────────────────────────────
+    // Needed for watchAllLedgerItems() collectionGroup query (managers/supervisors).
+    // Staff do NOT query this collection group (guarded in Flutter code).
+    match /{path=**}/ledger/{docId} {
+      allow read: if isAuthenticated();
+    }
+
+    // ── Bookings ─────────────────────────────────────────────────────────────
+    match /bookings/{bookingId} {
+      // Staff can read; guests can read their own booking
+      allow read: if isStaff() || (isAuthenticated() && request.auth.uid == bookingId);
+
+      // Staff can create/delete; public guests can create direct website bookings
+      allow create: if isStaff() || (
+        request.resource.data.channel == 'Direct Website' &&
+        request.resource.data.status == 'confirmed'
+      );
+      allow delete: if isStaff();
+
+      // Updates: staff can update general fields (price limits apply);
+      // guests can only update their breakfast choices.
+      allow update: if (isStaff() &&
+                       (!request.resource.data.diff(resource.data)
+                           .affectedKeys().hasAny(['manual_price_override', 'manualPriceOverride'])
+                        || isManager()))
+                    || (isAuthenticated() && request.auth.uid == bookingId &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['breakfastChoices']));
+
+      // Ledger sub-collection
+      match /ledger/{itemId} {
+        allow read, create: if isStaff();
+        // Only managers can void (mark isVoided)
+        allow update: if isManager() &&
+                         request.resource.data.diff(resource.data)
+                             .affectedKeys().hasOnly(['isVoided', 'voidedBy', 'voidedAt']);
+        allow delete: if false;
+      }
+
+      // Other sub-collections (audit_logs, etc.)
+      match /{subcollection}/{docId=**} {
+        allow read, write: if isStaff();
+      }
+    }
+
+    // ── Service Requests ─────────────────────────────────────────────────────
+    match /serviceRequests/{requestId} {
+      allow create: if isStaff() || (isAuthenticated() && request.resource.data.bookingId == request.auth.uid);
+      allow read: if isStaff() || (isAuthenticated() && resource.data.bookingId == request.auth.uid);
+      allow update: if isStaff();
+      allow delete: if isPrivileged();
+    }
+
+    // ── Maintenance tickets ───────────────────────────────────────────────────
+    match /maintenance_tickets/{ticketId} {
+      allow read: if isStaff() || (isAuthenticated() && resource.data.roomId != null);
+      allow create: if isStaff() || isAuthenticated(); // guests report issues from their room
+      allow update: if isStaff();
+      allow delete: if isPrivileged();
+    }
+
+    // ── Housekeeping Tasks ────────────────────────────────────────────────────
+    match /tasks/{taskId} {
+      allow read: if isStaff() || isAuthenticated();  // guests can read their room's tasks
+      allow create: if isStaff() || isAuthenticated(); // guests create tasks (room requests)
+      allow update: if isStaff();
+      allow delete: if isPrivileged();
+    }
+
+    // ── Meal Orders ──────────────────────────────────────────────────────────
+    match /meal_orders/{orderId} {
+      allow create: if isStaff() || (isAuthenticated() && request.resource.data.booking_id == request.auth.uid);
+      allow read: if isStaff() || (isAuthenticated() && resource.data.booking_id == request.auth.uid);
+      allow update: if isStaff() || (isAuthenticated() && resource.data.booking_id == request.auth.uid && request.resource.data.booking_id == request.auth.uid);
+      allow delete: if isStaff() || (isAuthenticated() && resource.data.booking_id == request.auth.uid);
+    }
+
+    // ── Kiosk & Live Support ─────────────────────────────────────────────────
+    match /kiosk_calls/{callId} {
+      allow read, write: if true;
+
+      match /{subcollection}/{docId=**} {
+        allow read, write: if true;
+      }
+    }
+
+    match /live_support_chats/{chatId} {
+      allow read, write: if true;
+    }
+
+    match /live_support_chat_sessions/{sessionId} {
+      allow read, write: if true;
+
+      match /{subcollection}/{docId=**} {
+        allow read, write: if true;
+      }
+    }
+
+    // ── Expenses ─────────────────────────────────────────────────────────────
+    match /expenses/{expenseId} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.userId == request.auth.uid;
+      allow update: if isStaff() && (
+        isManager() || (
+          resource.data.userId == request.auth.uid &&
+          resource.data.status == 'pending' &&
+          request.resource.data.status == 'pending'
+        )
+      );
+      allow delete: if isManager();
+    }
+
+    // ── Default catch-all ────────────────────────────────────────────────────
+    // Covers: users, rooms, kitchen_orders, cash_drops, audit_logs,
+    //         notifications, etc.
+    match /{collection}/{document=**} {
+      allow read: if isStaff();
+      allow write: if isStaff();
+    }
+  }
+}
