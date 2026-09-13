@@ -191,11 +191,67 @@ class PMSBrowserBot:
                 time.sleep(4)
 
             # 1. Select room category / Add Room
-            logger.info("Selecting available room category...")
-            self.driver.execute_script("""
-                var buttons = Array.from(document.querySelectorAll('button, a')).filter(b => b.innerText && b.innerText.includes('Add Room'));
-                if (buttons.length > 0) buttons[0].click();
-            """)
+            room_cat = (
+                booking_data.get("roomCategoryId")
+                or (booking_data.get("rooms") and booking_data["rooms"][0].get("id"))
+                or ""
+            ).lower()
+            room_name = (
+                (booking_data.get("rooms") and booking_data["rooms"][0].get("type"))
+                or booking_data.get("roomName")
+                or ""
+            ).lower()
+            rate_plan = (
+                (booking_data.get("rooms") and booking_data["rooms"][0].get("rate"))
+                or "bed & breakfast"
+            ).lower()
+
+            logger.info(f"Selecting room category (Category: {room_cat}, Name: {room_name}, Rate: {rate_plan})...")
+
+            select_script = f"""
+                var targetCat = {repr(room_cat)};
+                var targetName = {repr(room_name)};
+                var targetRate = {repr(rate_plan)};
+
+                var isTriple = targetCat.includes('triple') || targetName.includes('triple');
+                var isFamily = targetCat.includes('family') || targetCat.includes('falmily') || targetName.includes('family') || targetName.includes('falmily');
+                var isDouble = !isTriple && !isFamily;
+
+                var buttons = document.querySelectorAll("[id^='addroombut_']");
+                var bestBtn = null;
+                var roomTypeBtn = null;
+
+                for (var i = 0; i < buttons.length; i++) {{
+                    var btn = buttons[i];
+                    var row = btn.closest('.card-list, [id^="row_"]') || btn.parentElement;
+                    var title = (row ? row.innerText : '').toLowerCase();
+
+                    var matchesRoom = false;
+                    if (isTriple && title.includes('triple')) matchesRoom = true;
+                    else if (isFamily && (/fa[lm]+i|family|falmily/i.test(title))) matchesRoom = true;
+                    else if (isDouble && !title.includes('triple') && !(/fa[lm]+i|family|falmily/i.test(title)) && title.includes('double')) matchesRoom = true;
+
+                    if (matchesRoom) {{
+                        if (!roomTypeBtn) roomTypeBtn = btn;
+                        if (targetRate && (
+                            (targetRate.includes('breakfast') && title.includes('breakfast')) ||
+                            (targetRate.includes('only') && (title.includes('room only') || title.includes('room-only')))
+                        )) {{
+                            bestBtn = btn;
+                            break;
+                        }}
+                    }}
+                }}
+
+                var chosen = bestBtn || roomTypeBtn || (buttons.length > 0 ? buttons[0] : null);
+                if (chosen) {{
+                    chosen.click();
+                    return chosen.id;
+                }}
+                return null;
+            """
+            chosen_btn_id = self.driver.execute_script(select_script)
+            logger.info(f"Clicked Add Room button: {chosen_btn_id}")
             time.sleep(2)
 
             # Click main Book button (#bookingmulbtn) to advance to guest/billing details
@@ -215,7 +271,10 @@ class PMSBrowserBot:
             if not clean_phone:
                 clean_phone = "7771234"
 
-            logger.info(f"Filling billing info for: {first_name} {last_name}, Phone: {clean_phone}, Email: {email}")
+            special_requests = (booking_data.get("specialRequests") or "").strip()
+            special_note = f"{special_requests} [Web: {booking_ref}]".strip() if special_requests else f"[Web Ref: {booking_ref}]"
+
+            logger.info(f"Filling billing info for: {first_name} {last_name}, Phone: {clean_phone}, Email: {email}, Note: {special_note}")
 
             # Fill in form fields via JavaScript for maximum reliability
             fill_script = f"""
@@ -253,6 +312,12 @@ class PMSBrowserBot:
                 if (em) {{
                     em.value = {repr(email)};
                     if (window.jQuery) jQuery(em).trigger('change');
+                }}
+
+                var sreq = document.querySelector('#specialrequest_0');
+                if (sreq) {{
+                    sreq.value = {repr(special_note)};
+                    if (window.jQuery) jQuery(sreq).trigger('change');
                 }}
 
                 var agree = document.querySelector('#iagree');
