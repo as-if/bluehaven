@@ -86,6 +86,27 @@ class PMSBrowserBot:
             logger.warning(f"Failed to capture screenshot: {e}")
             return None
 
+    @staticmethod
+    def _format_date_for_pms(dt_val):
+        if not dt_val:
+            return None
+        if hasattr(dt_val, "strftime"):
+            return dt_val.strftime("%d-%m-%Y")
+        s = str(dt_val).strip()
+        # Handle ISO YYYY-MM-DD
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            parts = s[:10].split("-")
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        # Handle DD-MM-YYYY
+        if len(s) >= 10 and s[2] == "-" and s[5] == "-":
+            return s[:10]
+        try:
+            from dateutil import parser
+            parsed = parser.parse(s)
+            return parsed.strftime("%d-%m-%Y")
+        except Exception:
+            return s[:10]
+
     def create_booking(self, booking_data, dry_run=PMS_DRY_RUN):
         """
         Main entry point for creating a booking in the PMS.
@@ -132,6 +153,11 @@ class PMSBrowserBot:
         which puts the room on hold in eZee Absolute / iPMS 247 for staff confirmation.
         """
         booking_ref = booking_data.get("booking_ref") or booking_data.get("bookingId") or "DIRECT"
+        check_in_raw = booking_data.get("check_in") or booking_data.get("checkIn")
+        check_out_raw = booking_data.get("check_out") or booking_data.get("checkOut")
+        check_in_pms = self._format_date_for_pms(check_in_raw)
+        check_out_pms = self._format_date_for_pms(check_out_raw)
+
         try:
             self._init_driver()
             wait = WebDriverWait(self.driver, self.timeout)
@@ -141,6 +167,28 @@ class PMSBrowserBot:
 
             # Wait for page elements to load
             time.sleep(4)
+
+            # Set requested stay dates if provided
+            if check_in_pms and check_out_pms:
+                logger.info(f"📅 Setting reservation dates: {check_in_pms} to {check_out_pms}")
+                date_script = f"""
+                    var $ = window.jQuery;
+                    if ($ && $('#eZ_chkin').length && $('#eZ_chkout').length) {{
+                        var dIn = $.datepicker.parseDate('dd-mm-yy', {repr(check_in_pms)});
+                        var dOut = $.datepicker.parseDate('dd-mm-yy', {repr(check_out_pms)});
+                        $('#eZ_chkin').datepicker('setDate', dIn);
+                        var onSelectIn = $('#eZ_chkin').datepicker('option', 'onSelect');
+                        if (onSelectIn) onSelectIn.call($('#eZ_chkin')[0], {repr(check_in_pms)});
+
+                        $('#eZ_chkout').datepicker('setDate', dOut);
+                        var onSelectOut = $('#eZ_chkout').datepicker('option', 'onSelect');
+                        if (onSelectOut) onSelectOut.call($('#eZ_chkout')[0], {repr(check_out_pms)});
+
+                        if ($('#book').length) $('#book').click();
+                    }}
+                """
+                self.driver.execute_script(date_script)
+                time.sleep(4)
 
             # 1. Select room category / Add Room
             logger.info("Selecting available room category...")
