@@ -26,6 +26,10 @@ LOGS_DIR.mkdir(exist_ok=True)
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
 # Google Cloud / Firebase Settings
+sa_candidate = BASE_DIR.parent / "functions" / "service-account.json"
+if sa_candidate.exists() and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(sa_candidate.resolve())
+
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "bluehaven-automation")
 FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "bookings")
 

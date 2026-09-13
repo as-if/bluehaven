@@ -57,7 +57,7 @@ service cloud.firestore {
       // Staff can create/delete; public guests can create direct website bookings
       allow create: if isStaff() || (
         request.resource.data.channel == 'Direct Website' &&
-        request.resource.data.status == 'confirmed'
+        (request.resource.data.status in ['confirmed', 'pending_payment'])
       );
       allow delete: if isStaff();
 
