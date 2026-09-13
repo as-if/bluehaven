@@ -54,14 +54,14 @@ def parse_yanolja_direct_booking(html_body, subject):
     }
 
     # --- Reference Number ---
-    # Template: "BOOKING REFERENCE NO :R1C5169F0832C"
+    # Template: "BOOKING REFERENCE NO :P87DC6AA6F9BD" or subject "Booking Enquiry Number P87DC6AA6F9BD"
     try:
         ref_match = re.search(r'BOOKING\s+REFERENCE\s+NO\s*:\s*([A-Z0-9]+)', full_text)
         if ref_match:
             booking_data["booking_ref"] = ref_match.group(1).strip()
         else:
-            # Fallback: subject line "Booking Reference Number R1C5169F0832C - CONFIRMED"
-            ref_subject = re.search(r'Booking\s+Reference\s+Number\s+([A-Z0-9]+)', subject, re.IGNORECASE)
+            # Fallback: subject line "Booking Reference Number ..." or "Booking Enquiry Number ..."
+            ref_subject = re.search(r'Booking\s+(?:Reference|Enquiry)\s+Number\s+([A-Z0-9]+)', subject, re.IGNORECASE)
             if ref_subject:
                 booking_data["booking_ref"] = ref_subject.group(1).strip()
             else:
@@ -75,56 +75,63 @@ def parse_yanolja_direct_booking(html_body, subject):
         booking_data["booking_ref"] = "UNKNOWN"
 
     # --- Guest Name ---
-    # Supports full names and multi-word company/association names (e.g., "Multi Youth Association of Thulusdhoo")
     try:
         guest_name = "N/A"
 
-        # Strategy 1: DOM search for "Your Details"
-        yd_tag = soup.find(lambda tag: tag.name in ['td', 'th', 'div', 'p', 'b', 'strong'] and 'Your Details' in tag.get_text(strip=True))
-        if yd_tag:
-            cell = yd_tag.find_parent(['td', 'th'])
-            text_after = ''
-            if cell:
-                next_cell = cell.find_next_sibling(['td', 'th'])
-                if next_cell:
-                    text_after = next_cell.get_text(strip=True)
-                else:
-                    tr = cell.find_parent('tr')
-                    if tr:
-                        next_tr = tr.find_next_sibling('tr')
-                        if next_tr:
-                            text_after = next_tr.get_text(strip=True)
-            else:
-                next_sib = yd_tag.find_next_sibling(['div', 'p', 'span', 'tr', 'td', 'br'])
-                if next_sib:
-                    text_after = next_sib.get_text(strip=True)
+        # Strategy 0: Regex for "received a booking enquiry from <Name>"
+        enquiry_from = re.search(r'received a booking enquiry from\s+(?:Mr\.|Mrs\.|Ms\.|Dr\.)?\s*([^\r\n.]+)', full_text, re.IGNORECASE)
+        if enquiry_from:
+            cand = enquiry_from.group(1).strip()
+            cand = re.sub(r'[\s,]+$', '', cand)
+            if cand and not any(kw in cand.lower() for kw in ['hotel', 'staff', 'blue haven']):
+                guest_name = cand
 
-            clean_cand = ' '.join(text_after.split())
-            if clean_cand:
-                first_line = re.split(r'Email|Phone|Mobile|Address', clean_cand, flags=re.IGNORECASE)[0].strip()
-                if first_line and not any(first_line.lower().startswith(kw) for kw in ['email', 'phone', 'mobile', 'address']):
-                    guest_name = first_line
-
-        # Strategy 2: Regex search for "Your Details"
-        yd_match = re.search(r'Your\s+Details\s*:?\s*(?:[\r\n]+\s*)*([^\r\n]+)', full_text, re.IGNORECASE)
-        if yd_match:
-            cand = yd_match.group(1).strip()
-            cand = re.split(r'Email|Phone|Mobile|Address', cand, flags=re.IGNORECASE)[0].strip()
-            if cand and not any(cand.lower().startswith(kw) for kw in ['email', 'phone', 'mobile', 'address']):
-                if guest_name == "N/A" or len(cand) > len(guest_name):
+        # Strategy 1: Regex search for "Guest Details" or "Your Details"
+        if guest_name == "N/A":
+            gd_match = re.search(r'(?:Guest|Your)\s+Details\s*:?\s*(?:[\r\n]+\s*)*([^\r\n]+)', full_text, re.IGNORECASE)
+            if gd_match:
+                cand = gd_match.group(1).strip()
+                cand = re.sub(r'^(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s*', '', cand, flags=re.IGNORECASE)
+                cand = re.split(r'Email|Phone|Mobile|Address', cand, flags=re.IGNORECASE)[0].strip()
+                cand = re.sub(r'[\s,]+$', '', cand)
+                if cand and not any(kw in cand.lower() for kw in ['email', 'phone', 'mobile', 'address', 'staff', 'hotel']):
                     guest_name = cand
 
-        # Strategy 3: Regex search for "Dear <Name>," (handles newlines inside greeting)
-        dear_match = re.search(
-            r'Dear\s+([\s\S]+?)(?=,|\n\s*Thank|\n\s*We\s+are|\n\s*Email|\n\s*Booking|\n\s*Check|\n\s*Rooms|\n\s*Rates)',
-            full_text,
-            re.IGNORECASE,
-        )
-        if dear_match:
-            cand_dear = " ".join(dear_match.group(1).split()).strip()
-            cand_dear = re.sub(r'[\s,]+$', '', cand_dear)
-            if cand_dear:
-                if guest_name == "N/A" or len(cand_dear) > len(guest_name):
+        # Strategy 2: DOM search for "Guest Details" or "Your Details"
+        if guest_name == "N/A":
+            yd_tag = soup.find(lambda tag: tag.name in ['td', 'th', 'div', 'p', 'b', 'strong', 'span'] and any(kw in tag.get_text(strip=True).lower() for kw in ['guest details', 'your details']))
+            if yd_tag:
+                cell = yd_tag.find_parent(['td', 'th', 'p', 'div'])
+                text_after = ''
+                if cell:
+                    next_cell = cell.find_next_sibling(['td', 'th', 'p', 'div'])
+                    if next_cell:
+                        text_after = next_cell.get_text(strip=True)
+                if not text_after:
+                    next_sib = yd_tag.find_next_sibling(['div', 'p', 'span', 'tr', 'td', 'br'])
+                    if next_sib:
+                        text_after = next_sib.get_text(strip=True)
+
+                clean_cand = ' '.join(text_after.split())
+                if clean_cand:
+                    first_line = re.split(r'Email|Phone|Mobile|Address', clean_cand, flags=re.IGNORECASE)[0].strip()
+                    first_line = re.sub(r'^(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s*', '', first_line, flags=re.IGNORECASE)
+                    first_line = re.sub(r'[\s,]+$', '', first_line)
+                    if first_line and not any(first_line.lower().startswith(kw) for kw in ['email', 'phone', 'mobile', 'address', 'hotel', 'staff']):
+                        guest_name = first_line
+
+        # Strategy 3: Regex search for "Dear <Name>," (excluding generic greetings)
+        if guest_name == "N/A":
+            dear_match = re.search(
+                r'Dear\s+([\s\S]+?)(?=,|\n\s*Thank|\n\s*We\s+are|\n\s*Email|\n\s*Booking|\n\s*Check|\n\s*Rooms|\n\s*Rates)',
+                full_text,
+                re.IGNORECASE,
+            )
+            if dear_match:
+                cand_dear = " ".join(dear_match.group(1).split()).strip()
+                cand_dear = re.sub(r'^(?:Mr\.|Mrs\.|Ms\.|Dr\.)\s*', '', cand_dear, flags=re.IGNORECASE)
+                cand_dear = re.sub(r'[\s,]+$', '', cand_dear)
+                if cand_dear and not any(kw in cand_dear.lower() for kw in ['hotel', 'staff', 'guest', 'sir', 'madam']):
                     guest_name = cand_dear
 
         booking_data["guest_name"] = guest_name if guest_name else "N/A"
@@ -211,6 +218,18 @@ def parse_yanolja_direct_booking(html_body, subject):
     except (ValueError, AttributeError) as e:
         print(f"⚠️ Yanolja Direct: Total price extraction error: {e}")
         booking_data["total_price"] = 0.0
+
+    # --- Special Request & Web Reference Tag ---
+    try:
+        spec_match = re.search(r'Special\s+Request\s*:\s*([^\r\n]+)', full_text, re.IGNORECASE)
+        if spec_match:
+            spec_text = spec_match.group(1).strip()
+            booking_data["special_requests"] = spec_text
+            web_match = re.search(r'\[\s*Web(?:\s+Ref)?:\s*(BH-DIR-[A-Z0-9]+)\s*\]', spec_text, re.IGNORECASE)
+            if web_match:
+                booking_data["original_web_ref"] = web_match.group(1).strip()
+    except Exception as e:
+        print(f"⚠️ Yanolja Direct: Special requests extraction error: {e}")
 
     # --- Room Details from HTML Table ---
     # The "Rooms Details" table has columns: Room Type | Guest(s) | No of rooms | ...

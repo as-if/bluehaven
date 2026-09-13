@@ -310,13 +310,44 @@ def save_direct_booking_to_firestore(parsed_booking, internal_date):
     check_in_dt = parse_date(parsed_booking.get("check_in", "N/A"), "checkin")
     check_out_dt = parse_date(parsed_booking.get("check_out", "N/A"), "checkout")
 
+    # Correlate with booking_requests queue if web reference tag was included
+    original_web_ref = parsed_booking.get("original_web_ref")
+    guest_email = parsed_booking.get("guest_email", "N/A")
+    phone = parsed_booking.get("phone", "N/A")
+    country = parsed_booking.get("country", "")
+    flight_number = parsed_booking.get("flight_number", "")
+    special_requests = parsed_booking.get("special_requests", "")
+
+    if original_web_ref:
+        try:
+            req_snap = db.collection("booking_requests").document(original_web_ref).get()
+            if req_snap.exists:
+                req_data = req_snap.to_dict()
+                if not guest_email or "N/A" in guest_email or "*" in guest_email:
+                    guest_email = req_data.get("email") or guest_email
+                if not phone or phone == "N/A":
+                    phone = req_data.get("phone") or phone
+                if not country:
+                    country = req_data.get("country") or country
+                if not flight_number:
+                    flight_number = req_data.get("flightNumber") or flight_number
+                if not special_requests or "[" in special_requests:
+                    clean_req = req_data.get("specialRequests") or ""
+                    if clean_req:
+                        special_requests = clean_req
+        except Exception as e:
+            print(f"Could not enrich from booking_requests: {e}")
+
     booking_doc = {
         "booking_ref": booking_ref,
         "guest_name": parsed_booking.get("guest_name", "N/A"),
-        "guest_email": parsed_booking.get("guest_email", "N/A"),
+        "guest_email": guest_email,
         "channel": parsed_booking.get("channel", "Direct/Walk-in"),
         "voucher_no": booking_ref,
-        "phone": "N/A",
+        "phone": phone,
+        "country": country,
+        "flightNumber": flight_number,
+        "specialRequests": special_requests,
         "total_price": parsed_booking.get("total_price", 0.0),
         "total_paid": 0.0,
         "assigned_room_id": "Not Assigned",
@@ -377,9 +408,9 @@ def gmail_pubsub_handler(cloud_event):
         creds = get_gmail_creds()
         service = build('gmail', 'v1', credentials=creds)
 
-        # Limit to 1 message per run to prevent timeout/overflow during testing
+        # Retrieve recent messages with the API_Yanolja_Bookings label
         results = service.users().messages().list(
-            userId='me', q="label:API_Yanolja_Bookings", maxResults=1
+            userId='me', q="label:API_Yanolja_Bookings", maxResults=10
         ).execute()
         messages = results.get('messages', [])
 
@@ -387,7 +418,21 @@ def gmail_pubsub_handler(cloud_event):
             print("No messages found.")
             return
 
-        msg_id = messages[0]['id']
+        # Find the first message that has not yet been processed
+        target_msg_id = None
+        for m in messages:
+            cand_id = m['id']
+            p_snap = db.collection('processed_emails').document(cand_id).get()
+            if not p_snap.exists:
+                target_msg_id = cand_id
+                break
+
+        if not target_msg_id:
+            print("All recent messages have already been processed.")
+            return
+
+        msg_id = target_msg_id
+        print(f"Processing message ID: {msg_id}")
         msg = service.users().messages().get(
             userId='me', id=msg_id, format='raw'
         ).execute()
@@ -398,10 +443,20 @@ def gmail_pubsub_handler(cloud_event):
         subject = subject_raw.lower()
         sender = email_msg.get('From', '')
 
-        if 'yanoljacloudsolution.com' in sender or 'booking ref' in subject:
+        if 'yanoljacloudsolution.com' in sender or 'booking ref' in subject or 'booking enquiry' in subject:
 
-            # ── Route 1: Direct/Walk-in bookings ──────────────────────
-            if "reservations@yanoljacloudsolution.com" in sender:
+            # ── Route 1: Direct/Walk-in & Booking Enquiry emails ───────
+            is_direct_template = (
+                'yanoljacloudsolution.com' in sender and (
+                    'booking enquiry' in subject or
+                    'booking reference number' in subject or
+                    'new booking enquiry' in subject or
+                    'reservations@' in sender or
+                    'notifications@' in sender
+                )
+            )
+
+            if is_direct_template:
                 print("📌 Routing to Direct/Walk-in parser...")
 
                 # Extract HTML body — these emails use an HTML template
@@ -448,17 +503,30 @@ def gmail_pubsub_handler(cloud_event):
                     update_firestore(booking_ref, extracted, status, msg['internalDate'])
                 else:
                     print("Error: No HTML body.")
+
+            # Record in processed_emails collection to prevent re-processing
+            db.collection('processed_emails').document(msg_id).set({
+                'processed_at': firestore.SERVER_TIMESTAMP,
+                'subject': subject_raw,
+                'sender': sender
+            }, merge=True)
+            print(f"Recorded message {msg_id} in processed_emails.")
         else:
             print(f"Skipping email as it does not match criteria: {subject_raw} from {sender}")
+            db.collection('processed_emails').document(msg_id).set({
+                'processed_at': firestore.SERVER_TIMESTAMP,
+                'skipped': True,
+                'subject': subject_raw,
+                'sender': sender
+            }, merge=True)
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
 
     finally:
-        # Remove label 'API_Yanolja_Bookings' from the retrieved message so we don't process it again
+        # Attempt to remove label 'API_Yanolja_Bookings' if permissions allow
         if msg_id and service:
             try:
-                # Find label ID for API_Yanolja_Bookings
                 labels_results = service.users().labels().list(userId='me').execute()
                 label_id = next((l['id'] for l in labels_results.get('labels', []) if l['name'] == 'API_Yanolja_Bookings'), None)
                 if label_id:
@@ -467,8 +535,6 @@ def gmail_pubsub_handler(cloud_event):
                         id=msg_id,
                         body={'removeLabelIds': [label_id]}
                     ).execute()
-                    print(f"Successfully removed label 'API_Yanolja_Bookings' (ID: {label_id}) from message {msg_id}")
-                else:
-                    print("Warning: label 'API_Yanolja_Bookings' not found to remove.")
-            except Exception as le:
-                print(f"Failed to remove label from message {msg_id}: {le}")
+                    print(f"Successfully removed label 'API_Yanolja_Bookings' from message {msg_id}")
+            except Exception:
+                pass
