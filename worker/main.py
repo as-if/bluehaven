@@ -50,7 +50,7 @@ def parse_date(date_str, time_type='checkin'):
     Timezone: GMT+5
     """
     if not date_str or date_str == "N/A":
-        return datetime.datetime.now()
+        return None
     
     clean_str = date_str.strip()
     dt = None
@@ -62,8 +62,8 @@ def parse_date(date_str, time_type='checkin'):
             # Format 2: YYYY-MM-DD
             dt = datetime.datetime.strptime(clean_str, "%Y-%m-%d")
         except ValueError:
-            print(f"⚠️ Date parse error: '{clean_str}', defaulting to NOW.")
-            return datetime.datetime.now()
+            print(f"⚠️ Date parse error: '{clean_str}', returning None.")
+            return None
     
     # Set default time based on check-in or check-out
     if time_type == 'checkin':
@@ -271,9 +271,16 @@ def save_direct_booking_to_firestore(parsed_booking, internal_date):
 
     doc_ref = db.collection(COLLECTION_NAME).document(booking_ref)
 
-    # Check if the booking already exists to preserve status
+    # Check if the booking already exists (by ID or voucher_no) to preserve status and dates
     booking_snapshot = doc_ref.get()
     exists = booking_snapshot.exists
+
+    if not exists:
+        voucher_match = list(db.collection(COLLECTION_NAME).where("voucher_no", "==", booking_ref).limit(1).stream())
+        if voucher_match:
+            doc_ref = voucher_match[0].reference
+            booking_snapshot = voucher_match[0]
+            exists = True
 
     status = parsed_booking.get("status", "confirmed")
     if exists:
@@ -308,11 +315,8 @@ def save_direct_booking_to_firestore(parsed_booking, internal_date):
         "guest_name": parsed_booking.get("guest_name", "N/A"),
         "guest_email": parsed_booking.get("guest_email", "N/A"),
         "channel": parsed_booking.get("channel", "Direct/Walk-in"),
-        "voucher_no": "N/A",
+        "voucher_no": booking_ref,
         "phone": "N/A",
-        # Typed fields
-        "check_in": check_in_dt,
-        "check_out": check_out_dt,
         "total_price": parsed_booking.get("total_price", 0.0),
         "total_paid": 0.0,
         "assigned_room_id": "Not Assigned",
@@ -324,6 +328,11 @@ def save_direct_booking_to_firestore(parsed_booking, internal_date):
         "source_email": parsed_booking.get("source_email", ""),
         "last_updated_by": "System (Yanolja Direct)",
     }
+
+    if check_in_dt:
+        booking_doc["check_in"] = check_in_dt
+    if check_out_dt:
+        booking_doc["check_out"] = check_out_dt
 
     # Add adults/children to meta if present at top level
     if "adults" in parsed_booking:

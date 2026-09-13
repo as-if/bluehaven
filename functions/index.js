@@ -138,7 +138,7 @@ exports.onBookingUpdate = onDocumentWritten(
             beforeOut.seconds !== afterOut.seconds;
         const priceChanged = before.total_price !== after.total_price;
 
-        if (!shouldNotify &&
+        if (!shouldNotify && after.status !== "cancelled" &&
             (checkInChanged || checkOutChanged || priceChanged)) {
           const checkInStr = formatDate(after.check_in);
           const checkOutStr = formatDate(after.check_out);

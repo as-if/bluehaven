@@ -148,36 +148,37 @@ def parse_yanolja_direct_booking(html_body, subject):
         booking_data["guest_email"] = "N/A"
 
     # --- Check-In Date ---
-    # Template: "Check In Date : 30-04-2026"
-    # Output: YYYY-MM-DD string for the Firestore helper to convert to Timestamp
+    # Templates: "Check In Date : 30-04-2026", "Check-In: 30/04/2026", "Arrival: 30-04-2026"
     try:
         checkin_match = re.search(
-            r'Check\s+In\s+Date\s*:\s*(\d{2}-\d{2}-\d{4})', full_text
+            r'(?:Check[-\s]*In(?:\s+Date)?|Arrival(?:\s+Date)?)\s*[:\-]\s*(\d{2}[-/]\d{2}[-/]\d{4})',
+            full_text,
+            re.IGNORECASE
         )
         if checkin_match:
-            raw_date = checkin_match.group(1).strip()
+            raw_date = checkin_match.group(1).strip().replace('/', '-')
             dt = datetime.datetime.strptime(raw_date, "%d-%m-%Y")
             booking_data["check_in"] = dt.strftime("%Y-%m-%d")
         else:
             booking_data["check_in"] = "N/A"
-    except (ValueError, AttributeError) as e:
+    except Exception as e:
         print(f"⚠️ Yanolja Direct: Check-in date parse error: {e}")
         booking_data["check_in"] = "N/A"
 
     # --- Check-Out Date ---
-    # Template: "Check Out Date : 01-05-2026 05:00:00 PM" (may have time suffix)
-    # We only need the date portion DD-MM-YYYY
     try:
         checkout_match = re.search(
-            r'Check\s+Out\s+Date\s*:\s*(\d{2}-\d{2}-\d{4})', full_text
+            r'(?:Check[-\s]*Out(?:\s+Date)?|Departure(?:\s+Date)?)\s*[:\-]\s*(\d{2}[-/]\d{2}[-/]\d{4})',
+            full_text,
+            re.IGNORECASE
         )
         if checkout_match:
-            raw_date = checkout_match.group(1).strip()
+            raw_date = checkout_match.group(1).strip().replace('/', '-')
             dt = datetime.datetime.strptime(raw_date, "%d-%m-%Y")
             booking_data["check_out"] = dt.strftime("%Y-%m-%d")
         else:
             booking_data["check_out"] = "N/A"
-    except (ValueError, AttributeError) as e:
+    except Exception as e:
         print(f"⚠️ Yanolja Direct: Check-out date parse error: {e}")
         booking_data["check_out"] = "N/A"
 
