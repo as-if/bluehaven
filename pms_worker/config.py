@@ -31,7 +31,7 @@ if sa_candidate.exists() and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(sa_candidate.resolve())
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "bluehaven-automation")
-FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "bookings")
+FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "booking_requests")
 
 # PMS Configuration (eZee Absolute / iPMS 247)
 PMS_HOTEL_CODE = os.getenv("PMS_HOTEL_CODE", "bluehavenretreat")

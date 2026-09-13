@@ -73,34 +73,18 @@ def sync_pending_bookings(db=None):
             if result.get("success"):
                 pms_id = result.get("pms_reservation_id", f"PMS-{booking_ref}")
                 
-                # Update the original Firestore booking document with the official PMS Reference
+                # Update the booking request document with the official PMS Reference
+                # so the web front-end receives the hold confirmation.
                 doc_snap.reference.update({
-                    "booking_ref": pms_id,
-                    "voucher_no": pms_id,
-                    "pms_order_number": pms_id,
+                    "status": "synced",
                     "pms_sync.status": "synced",
                     "pms_sync.synced_at": firestore.SERVER_TIMESTAMP,
                     "pms_sync.pms_reservation_id": pms_id,
+                    "voucher_no": pms_id,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 })
 
-                # Create an alias document under doc(pms_id) so queries, staff lookups,
-                # and email processors using the PMS Order Number resolve immediately.
-                if doc_id != pms_id:
-                    alias_data = doc_snap.to_dict()
-                    alias_data["booking_ref"] = pms_id
-                    alias_data["voucher_no"] = pms_id
-                    alias_data["pms_order_number"] = pms_id
-                    if "pms_sync" not in alias_data:
-                        alias_data["pms_sync"] = {}
-                    alias_data["pms_sync"]["status"] = "synced"
-                    alias_data["pms_sync"]["pms_reservation_id"] = pms_id
-                    alias_data["original_web_ref"] = doc_id
-                    alias_data["updated_at"] = firestore.SERVER_TIMESTAMP
-                    bookings_ref.document(pms_id).set(alias_data, merge=True)
-                    logger.info(f"🔗 Created alias doc bookings/{pms_id} for web ref {doc_id}")
-
-                logger.info(f"✅ Successfully synced booking {booking_ref} -> PMS Ref: {pms_id}")
+                logger.info(f"✅ Successfully held room in PMS for request {booking_ref} -> PMS Ref: {pms_id}")
                 synced_count += 1
             else:
                 new_attempts = current_attempts + 1

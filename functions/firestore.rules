@@ -86,6 +86,16 @@ service cloud.firestore {
       }
     }
 
+    // ── Booking Requests (Direct Website queue for PMS automation) ───────────
+    match /booking_requests/{requestId} {
+      // Direct website submissions can create pending booking requests
+      allow create: if request.resource.data.channel == 'Direct Website';
+      // Anyone can read their booking request to get the PMS confirmation status
+      allow read: if true;
+      // Only staff or backend service accounts can update or delete
+      allow update, delete: if isStaff();
+    }
+
     // ── Service Requests ─────────────────────────────────────────────────────
     match /serviceRequests/{requestId} {
       allow create: if isStaff() || (isAuthenticated() && request.resource.data.bookingId == request.auth.uid);
