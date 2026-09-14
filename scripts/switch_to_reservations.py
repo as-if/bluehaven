@@ -8,7 +8,7 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION ---
 # NEW TOPIC NAME
 NEW_TOPIC = 'projects/bluehaven-automation/topics/gmail-reservation'
-LABEL_NAME = 'API_Yanolja_Bookings'
+LABEL_NAMES = ['API_Yanolja_Bookings', 'API_Yanolja_Rates']
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
@@ -48,27 +48,35 @@ def main():
     except Exception as e:
         print(f"   >>> (Ignored): {e}")
 
-    # 2. FIND LABEL ID
-    print(f"\n[2/3] Finding ID for label: '{LABEL_NAME}'...")
+    # 2. FIND LABEL IDS
+    print(f"\n[2/3] Finding IDs for labels: {LABEL_NAMES}...")
     results = service.users().labels().list(userId='me').execute()
     labels = results.get('labels', [])
+    all_labels = {l['name']: l['id'] for l in labels}
     
-    label_id = None
-    for l in labels:
-        if l['name'] == LABEL_NAME:
-            label_id = l['id']
-            break
+    watch_label_ids = []
+    for name in LABEL_NAMES:
+        if name in all_labels:
+            watch_label_ids.append(all_labels[name])
+            print(f"   >>> Found label '{name}': {all_labels[name]}")
+        else:
+            # Create label if it doesn't exist
+            try:
+                created = service.users().labels().create(userId='me', body={'name': name}).execute()
+                watch_label_ids.append(created['id'])
+                print(f"   >>> Created missing label '{name}': {created['id']}")
+            except Exception as e:
+                print(f"   >>> Warning: Could not create label '{name}': {e}")
     
-    if not label_id:
-        print(f"   >>> ERROR: Label '{LABEL_NAME}' not found.")
+    if not watch_label_ids:
+        print(f"   >>> ERROR: No valid labels found to watch.")
         return
-    print(f"   >>> Label ID: {label_id}")
 
     # 3. START NEW WATCH
     print(f"\n[3/3] Connecting to {NEW_TOPIC}...")
     request_body = {
         'topicName': NEW_TOPIC,
-        'labelIds': [label_id],
+        'labelIds': watch_label_ids,
         'labelFilterAction': 'include'
     }
 

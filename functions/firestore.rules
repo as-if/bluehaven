@@ -163,6 +163,18 @@ service cloud.firestore {
       allow delete: if isManager();
     }
 
+    // ── Room Rates (Synced from PMS) ─────────────────────────────────────────
+    match /room_rates/{rateId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // ── System Config ────────────────────────────────────────────────────────
+    match /system_config/{configId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
     // ── Default catch-all ────────────────────────────────────────────────────
     // Covers: users, rooms, kitchen_orders, cash_drops, audit_logs,
     //         notifications, etc.

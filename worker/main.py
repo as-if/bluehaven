@@ -11,10 +11,17 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from parsers.yanolja_direct_parser import parse_yanolja_direct_booking
+from parsers.yanolja_rate_parser import parse_yanolja_rate_update
 
 # --- CONFIGURATION ---
 db = firestore.Client()
 COLLECTION_NAME = 'bookings'
+ROOM_RATES_COLLECTION = 'room_rates'
+SYSTEM_CONFIG_COLLECTION = 'system_config'
+
+BOOKINGS_LABEL_NAME = 'API_Yanolja_Bookings'
+RATES_LABEL_NAME = 'API_Yanolja_Rates'
+WATCHED_LABELS = [BOOKINGS_LABEL_NAME, RATES_LABEL_NAME]
 
 CLIENT_ID = os.environ.get('CLIENT_ID')
 CLIENT_SECRET = os.environ.get('CLIENT_SECRET')
@@ -398,6 +405,87 @@ def save_direct_booking_to_firestore(parsed_booking, internal_date):
     )
 
 
+def sync_rates_to_firestore(parsed_rates, internal_date):
+    """
+    Syncs daily room rates parsed from Yanolja PMS rate update emails into Firestore:
+    1. Writes each daily rate to 'room_rates/{category}_{date}' (e.g. double_2026-09-14)
+    2. Updates 'system_config/room_rates' with the latest known base price per room category
+    """
+    if not parsed_rates:
+        print("⚠️ No valid rate rows found to sync.")
+        return
+
+    print(f"--- FIRESTORE WRITE (Room Rates): Syncing {len(parsed_rates)} rate records ---")
+
+    try:
+        email_time = datetime.datetime.fromtimestamp(
+            int(internal_date) / 1000, tz=datetime.timezone.utc
+        )
+    except Exception:
+        email_time = datetime.datetime.now(datetime.timezone.utc)
+
+    latest_category_rates = {}
+    batch = db.batch()
+    op_count = 0
+
+    for item in parsed_rates:
+        cat_id = item.get('room_category_id')
+        target_date = item.get('target_date')
+        if not cat_id or not target_date:
+            continue
+
+        doc_id = f"{cat_id}_{target_date}"
+        doc_ref = db.collection(ROOM_RATES_COLLECTION).document(doc_id)
+
+        rate_doc = {
+            'room_category_id': cat_id,
+            'room_name': item.get('room_name', 'Standard Room'),
+            'rate_plan': item.get('rate_plan', ''),
+            'source': item.get('source', 'bluehaven.mv - WEB'),
+            'date': target_date,
+            'price': item.get('price', 0.0),
+            'base_rate_new': item.get('base_rate_new', 0.0),
+            'base_rate_old': item.get('base_rate_old', 0.0),
+            'updated_by': item.get('updated_by', 'admin'),
+            'pms_log_timestamp': f"{item.get('log_date', '')} {item.get('log_time', '')}".strip(),
+            'server_address': item.get('server_address', ''),
+            'remote_address': item.get('remote_address', ''),
+            'synced_at': firestore.SERVER_TIMESTAMP,
+            'email_received_at': email_time,
+        }
+
+        batch.set(doc_ref, rate_doc, merge=True)
+        op_count += 1
+
+        # Track latest rates for the summary config
+        latest_category_rates[cat_id] = {
+            'price': item.get('price', 0.0),
+            'room_name': item.get('room_name', ''),
+            'rate_plan': item.get('rate_plan', ''),
+            'updated_at': firestore.SERVER_TIMESTAMP,
+        }
+
+        if op_count >= 400:
+            batch.commit()
+            batch = db.batch()
+            op_count = 0
+
+    # Update system_config/room_rates summary document
+    if latest_category_rates:
+        config_ref = db.collection(SYSTEM_CONFIG_COLLECTION).document('room_rates')
+        batch.set(config_ref, {
+            'rates': latest_category_rates,
+            'last_updated': firestore.SERVER_TIMESTAMP,
+            'source': 'Yanolja Cloud Solution (PMS)'
+        }, merge=True)
+        op_count += 1
+
+    if op_count > 0:
+        batch.commit()
+
+    print(f"✅ Successfully synced {len(parsed_rates)} rate records and updated {SYSTEM_CONFIG_COLLECTION}/room_rates.")
+
+
 @functions_framework.cloud_event
 def gmail_pubsub_handler(cloud_event):
     print("--- WORKER WAKE UP ---")
@@ -408,9 +496,10 @@ def gmail_pubsub_handler(cloud_event):
         creds = get_gmail_creds()
         service = build('gmail', 'v1', credentials=creds)
 
-        # Retrieve recent messages with the API_Yanolja_Bookings label
+        # Retrieve recent messages with either watched label (Bookings or Rates)
+        query_str = f"label:{BOOKINGS_LABEL_NAME} OR label:{RATES_LABEL_NAME}"
         results = service.users().messages().list(
-            userId='me', q="label:API_Yanolja_Bookings", maxResults=10
+            userId='me', q=query_str, maxResults=10
         ).execute()
         messages = results.get('messages', [])
 
@@ -445,8 +534,15 @@ def gmail_pubsub_handler(cloud_event):
 
         if 'yanoljacloudsolution.com' in sender or 'booking ref' in subject or 'booking enquiry' in subject:
 
+            # ── Route 0: PMS Room Rate Update emails ──────────────────
+            is_rate_update = (
+                'update log for rates' in subject or
+                ('rate' in subject and ('update' in subject or 'log' in subject))
+            )
+
             # ── Route 1: Direct/Walk-in & Booking Enquiry emails ───────
             is_direct_template = (
+                not is_rate_update and
                 'yanoljacloudsolution.com' in sender and (
                     'booking enquiry' in subject or
                     'booking reference number' in subject or
@@ -456,7 +552,24 @@ def gmail_pubsub_handler(cloud_event):
                 )
             )
 
-            if is_direct_template:
+            if is_rate_update:
+                print("📌 Routing to PMS Rate Update parser...")
+                body_html = ""
+                if email_msg.is_multipart():
+                    for part in email_msg.walk():
+                        if part.get_content_type() == 'text/html':
+                            body_html = part.get_payload(decode=True).decode()
+                            break
+                else:
+                    body_html = email_msg.get_payload(decode=True).decode()
+
+                if body_html:
+                    parsed_rates = parse_yanolja_rate_update(body_html, subject_raw)
+                    sync_rates_to_firestore(parsed_rates, msg['internalDate'])
+                else:
+                    print("Error: No HTML body found for Rate Update email.")
+
+            elif is_direct_template:
                 print("📌 Routing to Direct/Walk-in parser...")
 
                 # Extract HTML body — these emails use an HTML template
@@ -524,17 +637,18 @@ def gmail_pubsub_handler(cloud_event):
         print(f"CRITICAL ERROR: {e}")
 
     finally:
-        # Attempt to remove label 'API_Yanolja_Bookings' if permissions allow
+        # Attempt to remove watch labels if permissions allow
         if msg_id and service:
             try:
                 labels_results = service.users().labels().list(userId='me').execute()
-                label_id = next((l['id'] for l in labels_results.get('labels', []) if l['name'] == 'API_Yanolja_Bookings'), None)
-                if label_id:
+                all_labels = {l['name']: l['id'] for l in labels_results.get('labels', [])}
+                to_remove = [all_labels[name] for name in WATCHED_LABELS if name in all_labels]
+                if to_remove:
                     service.users().messages().modify(
                         userId='me',
                         id=msg_id,
-                        body={'removeLabelIds': [label_id]}
+                        body={'removeLabelIds': to_remove}
                     ).execute()
-                    print(f"Successfully removed label 'API_Yanolja_Bookings' from message {msg_id}")
-            except Exception:
-                pass
+                    print(f"Successfully removed watch labels from message {msg_id}")
+            except Exception as e:
+                print(f"Warning: Could not remove watch label: {e}")

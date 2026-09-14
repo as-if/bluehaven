@@ -9,7 +9,7 @@ CLIENT_ID = os.environ.get('CLIENT_ID')
 CLIENT_SECRET = os.environ.get('CLIENT_SECRET')
 REFRESH_TOKEN = os.environ.get('REFRESH_TOKEN')
 TOPIC_NAME = 'projects/bluehaven-automation/topics/gmail-reservation' # The new topic
-LABEL_NAME = 'API_Yanolja_Bookings'
+LABEL_NAMES = ['API_Yanolja_Bookings', 'API_Yanolja_Rates']
 
 def get_creds():
     """Generates credentials from Env Vars (No local files needed)."""
@@ -33,18 +33,22 @@ def renew_gmail_watch(request):
         creds = get_creds()
         service = build('gmail', 'v1', credentials=creds)
 
-        # 1. Find the Label ID dynamically
+        # 1. Find the Label IDs dynamically
         results = service.users().labels().list(userId='me').execute()
         labels = results.get('labels', [])
-        label_id = next((l['id'] for l in labels if l['name'] == LABEL_NAME), None)
+        all_labels = {l['name']: l['id'] for l in labels}
 
-        if not label_id:
-            return (f"Error: Label '{LABEL_NAME}' not found.", 500)
+        watch_label_ids = [all_labels[name] for name in LABEL_NAMES if name in all_labels]
+
+        if not watch_label_ids:
+            return (f"Error: None of the labels {LABEL_NAMES} were found.", 500)
+
+        print(f"Watching label IDs: {watch_label_ids} for labels: {[n for n in LABEL_NAMES if n in all_labels]}")
 
         # 2. Send the Watch Command
         request_body = {
             'topicName': TOPIC_NAME,
-            'labelIds': [label_id],
+            'labelIds': watch_label_ids,
             'labelFilterAction': 'include'
         }
         
